@@ -247,8 +247,7 @@ void lbb_prepare(const char *applet
 		IF_FEATURE_INDIVIDUAL(, char **argv))
 {
 #ifdef bb_cached_errno_ptr
-	(*(int **)not_const_pp(&bb_errno)) = get_perrno();
-	barrier();
+	ASSIGN_CONST_PTR(&bb_errno, get_perrno());
 #endif
 	applet_name = applet;
 
@@ -263,9 +262,14 @@ void lbb_prepare(const char *applet
 	 && strcmp(argv[1], "--help") == 0
 	 && !is_prefixed_with(applet, "busybox")
 	) {
-		/* Special case. POSIX says "test --help"
-		 * should be no different from e.g. "test --foo".  */
-		if (!ENABLE_TEST || strcmp(applet_name, "test") != 0)
+		/* Special cases. POSIX says "test --help"
+		 * should be no different from e.g. "test --foo".
+		 */
+		if (!(ENABLE_TEST && strcmp(applet_name, "test") == 0)
+		 && !(ENABLE_TRUE && strcmp(applet_name, "true") == 0)
+		 && !(ENABLE_FALSE && strcmp(applet_name, "false") == 0)
+		 && !(ENABLE_ECHO && strcmp(applet_name, "echo") == 0)
+		)
 			bb_show_usage();
 	}
 #endif
@@ -721,9 +725,9 @@ int scripted_main(int argc UNUSED_PARAM, char **argv)
 	int script = find_script_by_name(applet_name);
 	if (script >= 0)
 #  if ENABLE_SHELL_ASH
-		exit(ash_main(-script - 1, argv));
+		return ash_main(-script - 1, argv);
 #  elif ENABLE_SHELL_HUSH
-		exit(hush_main(-script - 1, argv));
+		return hush_main(-script - 1, argv);
 #  else
 		return 1;
 #  endif
@@ -888,37 +892,39 @@ int busybox_main(int argc UNUSED_PARAM, char **argv)
 
 	if (strcmp(argv[1], "--help") == 0) {
 		/* "busybox --help [<applet>]" */
-		if (!argv[2])
+		if (!argv[2]
+#  if ENABLE_FEATURE_SH_STANDALONE && ENABLE_FEATURE_TAB_COMPLETION
+		 || strcmp(argv[2], "busybox") == 0 /* prevent getting "No help available" */
+#  endif
+		)
 			goto help;
 		/* convert to "<applet> --help" */
-		argv[0] = argv[2];
+		applet_name = argv[0] = argv[2];
 		argv[2] = NULL;
+		if (find_applet_by_name(applet_name) >= 0) {
+			/* Make "--help foo" exit with 0: */
+			xfunc_error_retval = 0;
+			bb_show_usage();
+		} /* else: unknown applet, fall through (causes "applet not found" later) */
 	} else {
 		/* "busybox <applet> arg1 arg2 ..." */
 		argv++;
+		/* We support "busybox /a/path/to/applet args..." too. Allows for
+		 * "#!/bin/busybox"-style wrappers
+		 */
+		applet_name = bb_get_last_path_component_nostrip(argv[0]);
 	}
-	/* We support "busybox /a/path/to/applet args..." too. Allows for
-	 * "#!/bin/busybox"-style wrappers */
-	applet_name = bb_get_last_path_component_nostrip(argv[0]);
 	run_applet_and_exit(applet_name, argv);
 }
 # endif
 
 # if NUM_APPLETS > 0
-void FAST_FUNC run_applet_no_and_exit(int applet_no, const char *name, char **argv)
+void FAST_FUNC show_usage_if_dash_dash_help(int applet_no, char **argv)
 {
-	int argc = string_array_len(argv);
-
-	/*
-	 * We do not use argv[0]: do not want to repeat massaging of
-	 * "-/sbin/halt" -> "halt", for example.
-	 */
-	applet_name = name;
-
 	/* Special case. POSIX says "test --help"
 	 * should be no different from e.g. "test --foo".
 	 * Thus for "test", we skip --help check.
-	 * "true" and "false" are also special.
+	 * "true", "false", "echo" are also special.
 	 */
 	if (1
 #  if defined APPLET_NO_test
@@ -930,16 +936,36 @@ void FAST_FUNC run_applet_no_and_exit(int applet_no, const char *name, char **ar
 #  if defined APPLET_NO_false
 	 && applet_no != APPLET_NO_false
 #  endif
+#  if defined APPLET_NO_echo
+	 && applet_no != APPLET_NO_echo
+#  endif
 	) {
-		if (argc == 2 && strcmp(argv[1], "--help") == 0) {
+		if (argv[1] && !argv[2] && strcmp(argv[1], "--help") == 0) {
 			/* Make "foo --help" exit with 0: */
 			xfunc_error_retval = 0;
 			bb_show_usage();
 		}
 	}
+}
+
+void FAST_FUNC run_applet_no_and_exit(int applet_no, const char *name, char **argv)
+{
+	int argc;
+
+	/*
+	 * We do not use argv[0]: do not want to repeat massaging of
+	 * "-/sbin/halt" -> "halt", for example.
+	 */
+	applet_name = name;
+
+	show_usage_if_dash_dash_help(applet_no, argv);
+
 	if (ENABLE_FEATURE_SUID)
 		check_suid(applet_no);
+
+	argc = string_array_len(argv);
 	xfunc_error_retval = applet_main[applet_no](argc, argv);
+
 	/* Note: applet_main() may also not return (die on a xfunc or such) */
 	xfunc_die();
 }
@@ -978,10 +1004,10 @@ int scripted_main(int argc UNUSED_PARAM, char **argv)
 {
 #  if ENABLE_SHELL_ASH
 	int script = 0;
-	exit(ash_main(-script - 1, argv));
+	return ash_main(-script - 1, argv);
 #  elif ENABLE_SHELL_HUSH
 	int script = 0;
-	exit(hush_main(-script - 1, argv));
+	return hush_main(-script - 1, argv);
 #  else
 	return 1;
 #  endif
@@ -1067,7 +1093,7 @@ int main(int argc UNUSED_PARAM, char **argv)
 
 	full_write2_str(bb_basename(argv[0]));
 	full_write2_str(": no applets enabled\n");
-	exit(127);
+	return 127;
 
 #else
 
@@ -1086,8 +1112,14 @@ int main(int argc UNUSED_PARAM, char **argv)
 	 || ENABLE_FEATURE_PREFER_APPLETS
 	 || !BB_MMU
 	) {
-		if (NUM_APPLETS > 1)
-			set_task_comm(applet_name);
+		if (NUM_APPLETS > 1) {
+			/* Careful, do not trash comm of "SCRIPT.sh" -
+			 * the case when started from e.g. #!/bin/ash script.
+			 * (not limited to shells - #!/bin/awk scripts also exist)
+			 */
+			if (re_execed_comm())
+				set_task_comm(applet_name);
+		}
 	}
 
 	parse_config_file(); /* ...maybe, if FEATURE_SUID_CONFIG */
