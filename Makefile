@@ -1,8 +1,8 @@
 VERSION = 1
 PATCHLEVEL = 30
 SUBLEVEL = 1
-EXTRAVERSION = .YDS
-NAME = YashDSaraf
+EXTRAVERSION = .wahyu6070
+NAME = litegapps
 
 # *DOCUMENTATION*
 # To see a list of typical targets execute "make help"
